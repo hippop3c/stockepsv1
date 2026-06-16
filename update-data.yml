@@ -1,0 +1,39 @@
+name: 更新 FinMind 資料
+
+on:
+  schedule:
+    # 每天台灣時間 09:00 跑一次（UTC 01:00）。財報季末後幾天會自動帶入新季資料。
+    - cron: '0 1 * * *'
+  workflow_dispatch:   # 也可在 Actions 頁面手動按「Run workflow」立即執行
+
+permissions:
+  contents: write       # 允許 Actions 把 finmind_data.json commit 回 repo
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 取出程式碼
+        uses: actions/checkout@v4
+
+      - name: 安裝 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 安裝相依套件
+        run: pip install requests
+
+      - name: 抓取 FinMind 資料
+        env:
+          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}   # 從 repo Secrets 讀，不外流
+          YEARS: '3'
+        run: python finmind_fetch.py
+
+      - name: commit 更新後的 JSON
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add finmind_data.json
+          git commit -m "auto: update finmind_data $(date +%F)" || echo "資料無變化，略過"
+          git push
