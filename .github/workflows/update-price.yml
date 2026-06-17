@@ -1,0 +1,38 @@
+name: 更新股價 OHLC
+
+on:
+  schedule:
+    # 每個交易日台灣時間 18:00（UTC 10:00）盤後抓開高低收。週一~週五。
+    - cron: '0 10 * * 1-5'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  price:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: 取出程式碼
+        uses: actions/checkout@v4
+
+      - name: 安裝 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 安裝相依套件
+        run: pip install requests
+
+      - name: 抓全市場開高低收
+        run: python update_price.py
+
+      - name: commit 更新後的 JSON
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add finmind_data.json
+          git commit -m "auto: update ohlc $(date +%F)" || { echo "無變化"; exit 0; }
+          git pull --rebase --autostash origin main || true
+          git push
