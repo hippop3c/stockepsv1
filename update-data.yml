@@ -1,0 +1,44 @@
+name: 更新 FinMind 資料
+
+on:
+  schedule:
+    # 每週一台灣時間 06:00（UTC 前一日 22:00）。全市場逐檔約 4-5 小時。
+    - cron: '0 22 * * 0'
+  workflow_dispatch:   # 也可在 Actions 頁手動按 Run workflow 立即執行
+
+permissions:
+  contents: write
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - name: 取出程式碼
+        uses: actions/checkout@v4
+
+      - name: 安裝 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 安裝相依套件
+        run: pip install requests
+
+      - name: 抓取 FinMind 資料
+        env:
+          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+          YEARS: '10'
+          SLEEP: '6.5'
+          PYTHONUNBUFFERED: '1'
+        run: python finmind_fetch.py
+
+      - name: commit 更新後的 JSON
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add finmind_data.json
+          git commit -m "auto: update finmind_data $(date +%F)" || { echo "資料無變化，略過"; exit 0; }
+          # 跑很久期間 main 可能被改過，先把遠端變更 rebase 進來再 push，避免衝突
+          git pull --rebase --autostash origin main || true
+          git push
