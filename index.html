@@ -81,15 +81,16 @@ tbody tr:hover{background:var(--panel2)}
 /* 凍結左側 8 欄（代號~本益比），往右捲動時固定；公司欄縮窄讓類股貼近 */
 tbody td:nth-child(-n+8){position:sticky;z-index:3;background:var(--panel)}
 thead th:nth-child(-n+8){position:sticky;z-index:6;background:var(--panel2)}
+thead th:nth-child(-n+8),tbody td:nth-child(-n+8){box-sizing:border-box}
 tbody tr:hover td:nth-child(-n+8){background:var(--panel2)}
-thead th:nth-child(1),tbody td:nth-child(1){left:0;min-width:52px;width:52px}
-thead th:nth-child(2),tbody td:nth-child(2){left:52px;min-width:72px;width:72px}
-thead th:nth-child(3),tbody td:nth-child(3){left:124px;min-width:84px;width:84px;white-space:nowrap}
-thead th:nth-child(4),tbody td:nth-child(4){left:208px;min-width:58px;width:58px}
-thead th:nth-child(5),tbody td:nth-child(5){left:266px;min-width:58px;width:58px}
-thead th:nth-child(6),tbody td:nth-child(6){left:324px;min-width:58px;width:58px}
-thead th:nth-child(7),tbody td:nth-child(7){left:382px;min-width:58px;width:58px}
-thead th:nth-child(8),tbody td:nth-child(8){left:440px;min-width:64px;width:64px}
+thead th:nth-child(1),tbody td:nth-child(1){left:0;min-width:64px;width:64px}
+thead th:nth-child(2),tbody td:nth-child(2){left:64px;min-width:74px;width:74px}
+thead th:nth-child(3),tbody td:nth-child(3){left:138px;min-width:90px;width:90px;white-space:nowrap}
+thead th:nth-child(4),tbody td:nth-child(4){left:228px;min-width:62px;width:62px}
+thead th:nth-child(5),tbody td:nth-child(5){left:290px;min-width:62px;width:62px}
+thead th:nth-child(6),tbody td:nth-child(6){left:352px;min-width:62px;width:62px}
+thead th:nth-child(7),tbody td:nth-child(7){left:414px;min-width:62px;width:62px}
+thead th:nth-child(8),tbody td:nth-child(8){left:476px;min-width:72px;width:72px}
 /* 季別子欄：表頭顯示季別、每列對齊 */
 .qcol{min-width:56px;text-align:right;font-variant-numeric:tabular-nums}
 thead th.qcol{font-size:12.5px;color:var(--accent);padding:8px 6px;cursor:default}
