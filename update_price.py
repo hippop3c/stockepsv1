@@ -47,15 +47,30 @@ def find_key(keys, candidates):
             if c.lower() in k.lower(): return k      # 再找包含
     return None
 
-def fetch(url, tag):
-    try:
-        rows = requests.get(url, headers=HEADERS, timeout=60).json()
-        return rows if isinstance(rows, list) else []
-    except Exception as e:
-        print(f"   ⚠ {tag} 失敗（略過）: {e}")
-        return []
+def fetch(url, tag, retries=3):
+    """抓取並解析 JSON；遇到暫時性失敗（空回應、非 JSON、超時）自動重試。"""
+    import time
+    last = ""
+    for i in range(retries):
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=60)
+            txt = (r.text or "").strip()
+            if not txt:
+                last = f"空回應 (HTTP {r.status_code})"
+            else:
+                rows = r.json()
+                if isinstance(rows, list):
+                    return rows
+                last = "回傳非陣列"
+        except Exception as e:
+            last = str(e)
+        if i < retries - 1:
+            print(f"   ↻ {tag} 第 {i+1} 次失敗（{last}），5 秒後重試 ...")
+            time.sleep(5)
+    print(f"   ⚠ {tag} 重試 {retries} 次仍失敗（略過）: {last}")
+    return []
 
-def add_twse(ohlc):
+def add_twse(ohlc, market):
     """上市主板（欄位名已知）"""
     print("① 抓 TWSE 上市全市場 OHLC ...")
     rows = fetch(TWSE, "TWSE")
@@ -65,11 +80,12 @@ def add_twse(ohlc):
         if code and len(str(code)) == 4 and str(code).isdigit():
             ohlc[str(code)] = {"o": num(d.get("OpeningPrice")), "h": num(d.get("HighestPrice")),
                                "l": num(d.get("LowestPrice")),  "c": num(d.get("ClosingPrice"))}
+            market[str(code)] = "上市"
             n += 1
     print(f"   → 上市 {n} 檔")
     return n
 
-def add_tpex(url, tag, ohlc):
+def add_tpex(url, tag, ohlc, market, market_label):
     """上櫃主板 / 興櫃（欄位名自動偵測；興櫃可能只有收盤，沒有開高低）"""
     print(f"{tag} ...")
     rows = fetch(url, tag)
@@ -97,15 +113,17 @@ def add_tpex(url, tag, ohlc):
                 o = h = l = c
             if c is not None or o is not None:
                 ohlc[str(code)] = {"o": o, "h": h, "l": l, "c": c}
+                market[str(code)] = market_label
                 n += 1
     print(f"   → {tag} {n} 檔")
     return n
 
 def main():
     ohlc = {}
-    n_twse = add_twse(ohlc)
-    n_main = add_tpex(TPEX_MAIN, "② 抓 TPEX 上櫃主板 OHLC", ohlc)
-    n_esb  = add_tpex(TPEX_ESB,  "③ 抓 TPEX 興櫃 OHLC",     ohlc)
+    market = {}
+    n_twse = add_twse(ohlc, market)
+    n_main = add_tpex(TPEX_MAIN, "② 抓 TPEX 上櫃主板 OHLC", ohlc, market, "上櫃")
+    n_esb  = add_tpex(TPEX_ESB,  "③ 抓 TPEX 興櫃 OHLC",     ohlc, market, "興櫃")
     total = len(ohlc)
     print(f"\n本次抓到合計 {total} 檔（上市{n_twse}／上櫃{n_main}／興櫃{n_esb}）")
 
@@ -127,6 +145,9 @@ def main():
     merged = dict(data.get("ohlc", {}))
     merged.update(ohlc)
     data["ohlc"] = merged
+    merged_mkt = dict(data.get("market", {}))
+    merged_mkt.update(market)
+    data["market"] = merged_mkt
     data["price_updated"] = datetime.date.today().isoformat()
     with open(OUT, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
