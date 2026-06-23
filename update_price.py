@@ -82,7 +82,7 @@ def add_tpex(url, tag, ohlc):
     k_high  = find_key(keys, ["High", "最高", "高"])
     k_low   = find_key(keys, ["Low", "最低", "低"])
     # 興櫃常無開高低，收盤欄可能叫「最後成交價/均價/成交價」
-    k_close = find_key(keys, ["Close", "收盤", "收", "LastPrice", "最後成交價", "成交價", "均價", "Avg"])
+    k_close = find_key(keys, ["Close", "LatestPrice", "Average", "收盤", "最後成交價", "均價"])
     print(f"   對應欄位 code={k_code} open={k_open} high={k_high} low={k_low} close={k_close}")
     n = 0
     for d in rows:
