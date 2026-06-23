@@ -209,6 +209,14 @@ tbody td.qcol{padding:8px 6px}
         <select id="q_ind" onchange="render()" style="width:140px"><option value="">全部類股</option></select>
       </div>
       <div class="fld">
+        <span>市場別</span>
+        <div class="inline" id="mktSeg">
+          <label class="chk"><input type="checkbox" class="mkt" value="上市" checked onchange="render()"> 上市</label>
+          <label class="chk"><input type="checkbox" class="mkt" value="上櫃" checked onchange="render()"> 上櫃</label>
+          <label class="chk"><input type="checkbox" class="mkt" value="興櫃" checked onchange="render()"> 興櫃</label>
+        </div>
+      </div>
+      <div class="fld">
         <span>本益比 PE</span>
         <div class="inline">
           <input type="number" id="pe_min" placeholder="min" oninput="render()" style="width:56px">
@@ -296,7 +304,7 @@ const DEFAULT_TOKEN = '';  // GitHub 版不內嵌 token；資料由 Actions 抓�
 const LS = {
   token:'finmind_token', data:'eps_data', fin:'eps_financials',
   ind:'eps_industry', upd:'eps_lastupd', basis:'eps_basis',
-  proxy:'eps_proxy', proxyUrl:'eps_proxyurl', ohlc:'eps_ohlc'
+  proxy:'eps_proxy', proxyUrl:'eps_proxyurl', ohlc:'eps_ohlc', market:'eps_market'
 };
 let STATE = {
   rows: [],            // 主資料
@@ -308,6 +316,7 @@ let STATE = {
   industry: {},        // {code: 產業別}
   names: {},           // {code: 股票名稱}
   ohlc: {},            // {code: {o,h,l,c}}  開高低收
+  market: {},          // {code: 上市/上櫃/興櫃}
   qaxis: [],           // 統一季別軸（新→舊 date）
   _cols: [],           // 當前欄位（含季別欄）
   proxy: 'direct',     // direct | corsproxy | allorigins | custom
@@ -605,6 +614,7 @@ function render(){
   const indf=$('q_ind').value;
   const peMin=parseFloat($('pe_min').value), peMax=parseFloat($('pe_max').value);
   const needFin=$('needFin').checked;
+  const mktSel=[...document.querySelectorAll('.mkt:checked')].map(x=>x.value);
 
   let rows = STATE.rows.map(r=>{
     const ev=evalRow(r);
@@ -614,6 +624,7 @@ function render(){
   rows = rows.filter(r=>{
     if(search && !(r.code.toLowerCase().includes(search)||r.name.toLowerCase().includes(search))) return false;
     if(indf && r.industry!==indf) return false;
+    if(mktSel.length<3){ const m=STATE.market[r.code]||''; if(!mktSel.includes(m)) return false; }
     if(!isNaN(peMin)){ if(r._pe===null||r._pe<peMin) return false; }
     if(!isNaN(peMax)){ if(r._pe===null||r._pe>peMax) return false; }
     if(needFin && !STATE.financials[r.code]) return false;
@@ -804,6 +815,7 @@ function init(){
   const fin=localStorage.getItem(LS.fin); if(fin){ STATE.financials=JSON.parse(fin); }
   // ohlc 快取：開機先用上次存的收開高低，避免等 json 期間整欄空白
   const oh=localStorage.getItem(LS.ohlc); if(oh){ try{ STATE.ohlc=JSON.parse(oh); }catch(e){} }
+  const mk=localStorage.getItem(LS.market); if(mk){ try{ STATE.market=JSON.parse(mk); }catch(e){} }
   // 更新時間
   const up=localStorage.getItem(LS.upd); if(up) $('lastUpd').textContent='更新於 '+up;
   if(Object.keys(STATE.financials).length) $('seedWarn').style.display='none';
@@ -820,6 +832,7 @@ function init(){
       if(j.industry){ STATE.industry=j.industry; localStorage.setItem(LS.ind,JSON.stringify(j.industry)); applyIndustry(); }
       if(j.name){ STATE.names=j.name; }
       if(j.ohlc){ STATE.ohlc=j.ohlc; try{ localStorage.setItem(LS.ohlc, JSON.stringify(j.ohlc)); }catch(e){} }
+      if(j.market){ STATE.market=j.market; try{ localStorage.setItem(LS.market, JSON.stringify(j.market)); }catch(e){} }
       if(j.financials){
         Object.keys(j.financials).forEach(c=>{
           j.financials[c]=j.financials[c].map(r=>({
