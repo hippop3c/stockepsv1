@@ -217,17 +217,21 @@ def main() -> int:
 
     print(f"Scanning {len(selected)}/{len(codes)} stocks for public foreign-rating target prices ...", flush=True)
     source_blocked = False
+    consecutive_format_errors = 0
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, WORKERS)) as pool:
         for offset in range(0, len(selected), max(1, WORKERS)):
             batch = selected[offset:offset + max(1, WORKERS)]
-            batch_format_errors = 0
             for code, rows, error in pool.map(fetch_code, batch):
                 attempts[code] = today
                 if error is not None:
                     errors.append((code, error))
                     source_blocked = source_blocked or error.startswith("SOURCE_BLOCKED_")
-                    batch_format_errors += error == "SOURCE_FORMAT_UNRECOGNIZED"
+                    if error == "SOURCE_FORMAT_UNRECOGNIZED":
+                        consecutive_format_errors += 1
+                    else:
+                        consecutive_format_errors = 0
                     continue
+                consecutive_format_errors = 0
                 valid_pages += 1
                 scans[code] = today
                 prior = history.get(code, [])
@@ -257,8 +261,12 @@ def main() -> int:
                 else:
                     history.pop(code, None)
                     latest.pop(code, None)
-            if source_blocked or (batch and batch_format_errors == len(batch)):
-                reason = "403/429" if source_blocked else "an unrecognized page format"
+            # Some valid/new symbols legitimately have no rating table.  Only
+            # treat the source layout as broken after a sustained run of such
+            # responses; with one polite worker, a single empty page must not
+            # abort the entire daily rotation.
+            if source_blocked or consecutive_format_errors >= 8:
+                reason = "403/429" if source_blocked else "8 consecutive unrecognized page formats"
                 print(f"source returned {reason}; stopping this run and retaining cached values", flush=True)
                 break
             if offset + len(batch) < len(selected) and REQUEST_DELAY > 0:
