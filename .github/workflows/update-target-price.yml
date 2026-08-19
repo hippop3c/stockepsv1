@@ -1,9 +1,9 @@
-name: 更新股價 OHLC
+name: 更新外資目標價
 
 on:
   schedule:
-    # 每個交易日台灣時間 18:00（UTC 10:00）盤後抓開高低收。週一~週五。
-    - cron: '0 10 * * 1-5'
+    # 每日輪詢部分股票；約十天完整輪過一次全市場。
+    - cron: '30 11 * * *'
   workflow_dispatch:
 
 permissions:
@@ -14,9 +14,9 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  price:
+  target-price:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 45
     steps:
       - name: 取出程式碼
         uses: actions/checkout@v4
@@ -29,10 +29,13 @@ jobs:
       - name: 安裝相依套件
         run: pip install requests
 
-      - name: 抓全市場開高低收
+      - name: 輪詢公開外資評等目標價
         env:
-          PRICE_HISTORY_DAYS: '30'
-        run: python update_price.py
+          TARGET_PRICE_MAX_STOCKS: '240'
+          TARGET_PRICE_WORKERS: '1'
+          TARGET_PRICE_REQUEST_DELAY: '1.0'
+          TARGET_PRICE_HISTORY_DAYS: '365'
+        run: python update_target_price.py
 
       - name: 驗證資料結構與涵蓋率
         run: |
@@ -44,6 +47,6 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add finmind_data.json
-          git commit -m "auto: update ohlc $(date +%F)" || { echo "無變化"; exit 0; }
+          git commit -m "auto: update foreign target prices $(date +%F)" || { echo "無變化"; exit 0; }
           git pull --rebase --autostash origin main
           git push

@@ -1,157 +1,243 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-全市場開高低收（OHLC）更新腳本 → 更新 finmind_data.json 的 ohlc 欄
+"""Update latest official-market OHLC and retain a bounded daily history."""
 
-用證交所 TWSE + 櫃買 TPEX 官方 openapi，一次抓全市場最近交易日的開高低收，
-免費、不用 token、幾秒完成。讀現有 finmind_data.json（財報那份），
-只更新/新增 ohlc 欄後寫回 → 不用重抓 4 小時的財報。
+from __future__ import annotations
 
-涵蓋四個板：
-  上市主板  TWSE  : https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL
-  上櫃主板  TPEX  : https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes
-  興櫃      TPEX  : https://www.tpex.org.tw/openapi/v1/tpex_esb_latest_statistics
-  （openapi 為最近交易日資料，盤後隔日更新；對本益比參考足夠）
+import datetime as dt
+import json
+import os
+from pathlib import Path
+import sys
+import time
+from typing import Any
 
-防呆：
-  - 任一來源失敗 → 略過該來源、保留其它，不整批中斷。
-  - 抓到的總檔數低於門檻（疑似假日空檔／全面失敗）→ 不覆寫舊 ohlc，直接結束。
-  - 採「合併」而非「整批取代」：本次缺的板沿用上次的值，不會把畫面洗白。
-"""
+import requests
 
-import requests, json, datetime, sys
-
-OUT = "finmind_data.json"
-TWSE      = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
+OUT = Path(os.environ.get("DATA_FILE", "finmind_data.json"))
+TWSE = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
 TPEX_MAIN = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes"
-TPEX_ESB  = "https://www.tpex.org.tw/openapi/v1/tpex_esb_latest_statistics"   # 興櫃
-HEADERS = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
+TPEX_ESB = "https://www.tpex.org.tw/openapi/v1/tpex_esb_latest_statistics"
+HEADERS = {"User-Agent": "stockepsv1-data-updater/2.0", "Accept": "application/json"}
+MIN_TOTAL = int(os.environ.get("MIN_PRICE_TOTAL", "1000"))
+HISTORY_DAYS = int(os.environ.get("PRICE_HISTORY_DAYS", "30"))
+MIN_SOURCE_COUNTS = {
+    "TWSE": int(os.environ.get("MIN_TWSE_QUOTES", "800")),
+    "TPEX": int(os.environ.get("MIN_TPEX_QUOTES", "650")),
+    "ESB": int(os.environ.get("MIN_ESB_QUOTES", "150")),
+}
 
-# 寫檔門檻：本次抓到的總檔數低於此值，視為假日／全面失敗，不覆寫舊資料
-MIN_TOTAL = 1000
 
-def num(s):
-    """把 '1,234.5' / '--' / '' 轉成 float 或 None"""
-    if s is None: return None
-    s = str(s).replace(",", "").strip()
-    if s in ("", "--", "---", "N/A", "null", "除權", "除息", "除權息"): return None
-    try: return float(s)
-    except: return None
+def num(value: object) -> float | None:
+    if value is None:
+        return None
+    text = str(value).replace(",", "").strip()
+    if text in ("", "--", "---", "N/A", "null", "除權", "除息", "除權息"):
+        return None
+    try:
+        number = float(text)
+        # A zero quote is the exchange's no-trade placeholder, not a price.
+        return number if number > 0 else None
+    except ValueError:
+        return None
 
-def find_key(keys, candidates):
-    for c in candidates:
-        for k in keys:
-            if c.lower() == k.lower(): return k      # 先找完全相同
-    for c in candidates:
-        for k in keys:
-            if c.lower() in k.lower(): return k      # 再找包含
+
+def trading_date(value: object) -> str | None:
+    """Convert TWSE/TPEx ROC ``1150818`` (or ISO) to ``2026-08-18``."""
+    text = str(value or "").strip().replace("/", "").replace("-", "")
+    try:
+        if len(text) == 7 and text.isdigit():
+            return dt.date(int(text[:3]) + 1911, int(text[3:5]), int(text[5:7])).isoformat()
+        if len(text) == 8 and text.isdigit():
+            return dt.date(int(text[:4]), int(text[4:6]), int(text[6:8])).isoformat()
+    except ValueError:
+        return None
     return None
 
-def fetch(url, tag, retries=3):
-    """抓取並解析 JSON；遇到暫時性失敗（空回應、非 JSON、超時）自動重試。"""
-    import time
+
+def fetch(url: str, tag: str, retries: int = 3) -> list[dict[str, Any]]:
     last = ""
-    for i in range(retries):
+    for attempt in range(retries):
         try:
-            r = requests.get(url, headers=HEADERS, timeout=60)
-            txt = (r.text or "").strip()
-            if not txt:
-                last = f"空回應 (HTTP {r.status_code})"
-            else:
-                rows = r.json()
-                if isinstance(rows, list):
-                    return rows
-                last = "回傳非陣列"
-        except Exception as e:
-            last = str(e)
-        if i < retries - 1:
-            print(f"   ↻ {tag} 第 {i+1} 次失敗（{last}），5 秒後重試 ...")
+            response = requests.get(url, headers=HEADERS, timeout=60)
+            response.raise_for_status()
+            rows = response.json()
+            if isinstance(rows, list) and rows:
+                return rows
+            last = "empty/non-list response"
+        except Exception as exc:
+            last = str(exc)
+        if attempt < retries - 1:
+            print(f"   retry {tag} after failure: {last}", flush=True)
             time.sleep(5)
-    print(f"   ⚠ {tag} 重試 {retries} 次仍失敗（略過）: {last}")
+    print(f"   warning: {tag} failed after {retries} attempts: {last}", flush=True)
     return []
 
-def add_twse(ohlc, market):
-    """上市主板（欄位名已知）"""
-    print("① 抓 TWSE 上市全市場 OHLC ...")
-    rows = fetch(TWSE, "TWSE")
-    n = 0
-    for d in rows:
-        code = d.get("Code")
-        if code and len(str(code)) == 4 and str(code).isdigit():
-            ohlc[str(code)] = {"o": num(d.get("OpeningPrice")), "h": num(d.get("HighestPrice")),
-                               "l": num(d.get("LowestPrice")),  "c": num(d.get("ClosingPrice"))}
-            market[str(code)] = "上市"
-            n += 1
-    print(f"   → 上市 {n} 檔")
-    return n
 
-def add_tpex(url, tag, ohlc, market, market_label):
-    """上櫃主板 / 興櫃（欄位名自動偵測；興櫃可能只有收盤，沒有開高低）"""
-    print(f"{tag} ...")
-    rows = fetch(url, tag)
-    if not rows:
-        return 0
-    keys = list(rows[0].keys())
-    print("   欄位範例:", keys)
-    k_code  = find_key(keys, ["SecuritiesCompanyCode", "Code", "代號", "證券代號", "股票代號"])
-    k_open  = find_key(keys, ["Open", "開盤", "開"])
-    k_high  = find_key(keys, ["High", "最高", "高"])
-    k_low   = find_key(keys, ["Low", "最低", "低"])
-    # 興櫃常無開高低，收盤欄可能叫「最後成交價/均價/成交價」
-    k_close = find_key(keys, ["Close", "LatestPrice", "Average", "收盤", "最後成交價", "均價"])
-    print(f"   對應欄位 code={k_code} open={k_open} high={k_high} low={k_low} close={k_close}")
-    n = 0
-    for d in rows:
-        code = d.get(k_code) if k_code else None
-        if code and len(str(code)) == 4 and str(code).isdigit():
-            c = num(d.get(k_close)) if k_close else None
-            o = num(d.get(k_open))  if k_open  else None
-            h = num(d.get(k_high))  if k_high  else None
-            l = num(d.get(k_low))   if k_low   else None
-            # 興櫃若只有收盤，開高低就以收盤回填，至少四欄都有值、本益比可算
-            if c is not None and o is None and h is None and l is None:
-                o = h = l = c
-            if c is not None or o is not None:
-                ohlc[str(code)] = {"o": o, "h": h, "l": l, "c": c}
-                market[str(code)] = market_label
-                n += 1
-    print(f"   → {tag} {n} 檔")
-    return n
+def quote(code: str, date: str, o: object, h: object, low: object, c: object) -> dict[str, Any]:
+    return {"date": date, "o": num(o), "h": num(h), "l": num(low), "c": num(c)}
 
-def main():
-    ohlc = {}
-    market = {}
-    n_twse = add_twse(ohlc, market)
-    n_main = add_tpex(TPEX_MAIN, "② 抓 TPEX 上櫃主板 OHLC", ohlc, market, "上櫃")
-    n_esb  = add_tpex(TPEX_ESB,  "③ 抓 TPEX 興櫃 OHLC",     ohlc, market, "興櫃")
-    total = len(ohlc)
-    print(f"\n本次抓到合計 {total} 檔（上市{n_twse}／上櫃{n_main}／興櫃{n_esb}）")
 
-    # 讀現有 json（含上次的 ohlc）
+def pick(row: dict[str, Any], *candidates: str) -> object:
+    """Case-insensitive field fallback for occasional TPEx schema renames."""
+    lower = {str(key).lower(): key for key in row}
+    for candidate in candidates:
+        key = lower.get(candidate.lower())
+        if key is not None:
+            return row.get(key)
+    return None
+
+
+def collect() -> tuple[dict[str, dict[str, Any]], dict[str, str], dict[str, str], dict[str, int]]:
+    latest: dict[str, dict[str, Any]] = {}
+    markets: dict[str, str] = {}
+    source_dates: dict[str, str] = {}
+    source_counts: dict[str, int] = {}
+
+    specs = (
+        ("TWSE", TWSE, ("Code",), ("OpeningPrice", "Open"), ("HighestPrice", "High"), ("LowestPrice", "Low"), ("ClosingPrice", "Close"), "上市"),
+        ("TPEX", TPEX_MAIN, ("SecuritiesCompanyCode", "Code"), ("Open", "OpeningPrice"), ("High", "Highest"), ("Low", "Lowest"), ("Close", "LatestPrice"), "上櫃"),
+        # Emerging quotes do not publish an opening-price field. It remains null;
+        # high/low/latest are retained instead of fabricating an OHLC candle.
+        ("ESB", TPEX_ESB, ("SecuritiesCompanyCode", "Code"), (), ("Highest", "High"), ("Lowest", "Low"), ("LatestPrice", "Close", "Average"), "興櫃"),
+    )
+    for tag, url, code_keys, open_keys, high_keys, low_keys, close_keys, market in specs:
+        rows = fetch(url, tag)
+        count = 0
+        dates: list[str] = []
+        for row in rows:
+            code = str(pick(row, *code_keys) or "")
+            # Four-digit company shares only. This intentionally excludes ETF,
+            # ETN and bond codes (normally 00xx/006xx), which do not have EPS.
+            if len(code) != 4 or not code.isdigit() or code.startswith(("00", "91")):
+                continue
+            date = trading_date(row.get("Date"))
+            if not date:
+                continue
+            item = quote(
+                code,
+                date,
+                pick(row, *open_keys),
+                pick(row, *high_keys),
+                pick(row, *low_keys),
+                pick(row, *close_keys),
+            )
+            if all(item[key] is None for key in ("o", "h", "l", "c")):
+                continue
+            latest[code] = item
+            markets[code] = market
+            dates.append(date)
+            count += 1
+        if dates:
+            source_dates[tag] = max(dates)
+        source_counts[tag] = count
+        print(f"   {tag}: {count} securities; trading date={source_dates.get(tag, 'unknown')}", flush=True)
+    return latest, markets, source_dates, source_counts
+
+
+def load() -> dict[str, Any]:
     try:
-        with open(OUT, encoding="utf-8") as f:
-            data = json.load(f)
-    except Exception:
-        data = {}
+        with OUT.open(encoding="utf-8") as handle:
+            value = json.load(handle)
+        return value if isinstance(value, dict) else {}
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
 
-    # 防呆：本次太少 → 疑似假日/全面失敗，不覆寫舊資料
-    if total < MIN_TOTAL:
-        old = len(data.get("ohlc", {}))
-        print(f"❌ 本次僅 {total} 檔（< {MIN_TOTAL}），疑似休市或來源失敗，"
-              f"保留舊 ohlc（{old} 檔）不覆寫，結束。")
-        sys.exit(0)
 
-    # 合併：以本次新值覆蓋舊值，本次沒抓到的板沿用上次（避免單一來源失敗洗白）
-    merged = dict(data.get("ohlc", {}))
-    merged.update(ohlc)
-    data["ohlc"] = merged
-    merged_mkt = dict(data.get("market", {}))
-    merged_mkt.update(market)
-    data["market"] = merged_mkt
-    data["price_updated"] = datetime.date.today().isoformat()
-    with open(OUT, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
-    print(f"\n✅ 完成！本次更新 {total} 檔，合併後 ohlc 共 {len(merged)} 檔，寫入 {OUT}")
+def atomic_dump(data: dict[str, Any]) -> None:
+    temp = OUT.with_suffix(OUT.suffix + ".tmp")
+    with temp.open("w", encoding="utf-8", newline="\n") as handle:
+        json.dump(data, handle, ensure_ascii=False, separators=(",", ":"))
+        handle.write("\n")
+    os.replace(temp, OUT)
+
+
+def merge_history(
+    old: object,
+    latest: dict[str, dict[str, Any]],
+    max_date: str,
+    active: set[str] | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+    history = dict(old) if isinstance(old, dict) else {}
+    cutoff = (dt.date.fromisoformat(max_date) - dt.timedelta(days=HISTORY_DAYS)).isoformat()
+    for code, row in latest.items():
+        prior = history.get(code, [])
+        by_date = {
+            str(item.get("date")): item
+            for item in prior
+            if isinstance(item, dict) and str(item.get("date", "")) >= cutoff
+        } if isinstance(prior, list) else {}
+        by_date[row["date"]] = row
+        history[code] = [by_date[key] for key in sorted(by_date)]
+    # Prune inactive symbols too, preventing unbounded JSON growth.
+    for code in list(history):
+        if active is not None and code not in active:
+            del history[code]
+            continue
+        rows = history[code]
+        if not isinstance(rows, list):
+            del history[code]
+            continue
+        kept = [row for row in rows if isinstance(row, dict) and str(row.get("date", "")) >= cutoff]
+        if kept:
+            history[code] = kept
+        else:
+            del history[code]
+    return history
+
+
+def main() -> int:
+    print("Fetching official latest OHLC ...", flush=True)
+    latest, markets, source_dates, source_counts = collect()
+    bad_sources = [
+        tag for tag, minimum in MIN_SOURCE_COUNTS.items()
+        if source_counts.get(tag, 0) < minimum or tag not in source_dates
+    ]
+    if len(latest) < MIN_TOTAL or bad_sources:
+        print(
+            f"error: incomplete quote snapshot ({len(latest)} total; bad sources={bad_sources}); "
+            "refusing to overwrite cached data",
+            flush=True,
+        )
+        return 1
+
+    max_date = max(source_dates.values())
+    old = load()
+    listed = old.get("active_stock_ids", [])
+    active = {
+        str(code) for code in listed
+        if len(str(code)) == 4 and str(code).isdigit() and not str(code).startswith(("00", "91"))
+    } if isinstance(listed, list) else set()
+    if not active:
+        print("error: no active stock universe; refusing to merge quotes", flush=True)
+        return 1
+    latest = {code: row for code, row in latest.items() if code in active}
+    markets = {code: market for code, market in markets.items() if code in active}
+    merged_latest = {
+        code: row for code, row in old.get("ohlc", {}).items()
+        if code in active and isinstance(row, dict)
+    }
+    merged_latest.update(latest)
+    merged_markets = {
+        code: market for code, market in old.get("market", {}).items()
+        if code in active
+    }
+    merged_markets.update(markets)
+
+    old.update({
+        "schema_version": 2,
+        "ohlc": merged_latest,
+        "ohlc_history": merge_history(old.get("ohlc_history", {}), latest, max_date, active),
+        "market": merged_markets,
+        # This is the actual market date, not the workflow execution date.
+        "price_updated": max_date,
+        "price_source_dates": source_dates,
+        "price_fetched_at": dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat(),
+    })
+    atomic_dump(old)
+    print(f"done: updated {len(latest)} latest quotes; history retained for {HISTORY_DAYS} calendar days", flush=True)
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

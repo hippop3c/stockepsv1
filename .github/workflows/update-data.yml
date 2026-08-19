@@ -9,6 +9,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: stockepsv1-data-writer
+  cancel-in-progress: false
+
 jobs:
   fetch:
     runs-on: ubuntu-latest
@@ -29,9 +33,15 @@ jobs:
         env:
           FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
           YEARS: '10'
+          EPS_OVERLAP_YEARS: '2'
           SLEEP: '6.5'
           PYTHONUNBUFFERED: '1'
         run: python finmind_fetch.py
+
+      - name: 驗證資料結構與涵蓋率
+        run: |
+          python -m unittest discover -s tests -v
+          python validate_data.py
 
       - name: commit 更新後的 JSON
         run: |
@@ -40,5 +50,5 @@ jobs:
           git add finmind_data.json
           git commit -m "auto: update finmind_data $(date +%F)" || { echo "資料無變化，略過"; exit 0; }
           # 跑很久期間 main 可能被改過，先把遠端變更 rebase 進來再 push，避免衝突
-          git pull --rebase --autostash origin main || true
+          git pull --rebase --autostash origin main
           git push
