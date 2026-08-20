@@ -400,17 +400,28 @@ async function fmGet(params){
   return j.data||[];
 }
 
-/* 重新整理時直接向 TWSE 取得最新已收盤日；官方端點允許瀏覽器跨來源讀取。 */
+/* 重新整理時直接取得三市場最新已收盤日；失敗時保留 GitHub 快照。 */
+const TPEX_CORS='https://quality.data.gov.tw/dq_download_json.php?nid=11371&md5_url=60b0c520b3da145594cdc100ed6833c5';
+const ESB_CORS='https://quality.data.gov.tw/dq_download_json.php?nid=11747&md5_url=ff2eb7aff4817884f443d7c01a99120a';
 function taipeiISO(daysAgo=0){
   const d=new Date(Date.now()+8*60*60*1000);
   d.setUTCDate(d.getUTCDate()-daysAgo);
   return d.toISOString().slice(0,10);
 }
+function rocISO(value){
+  const s=String(value??'').replace(/\D/g,'');
+  if(s.length!==7) return '';
+  const date=new Date(Date.UTC(Number(s.slice(0,3))+1911,Number(s.slice(3,5))-1,Number(s.slice(5,7))));
+  return Number.isNaN(date.getTime())?'':date.toISOString().slice(0,10);
+}
 function quoteNumber(value){
   const n=Number(String(value??'').replace(/,/g,'').trim());
   return Number.isFinite(n)&&n>0?n:null;
 }
-async function refreshTwseDaily(){
+function usableCode(code){
+  return /^\d{4}$/.test(code)&&!code.startsWith('91')&&(!STATE.activeStockIds||STATE.activeStockIds.has(code));
+}
+async function twseSnapshot(){
   const hint=/^\d{4}-\d{2}-\d{2}$/.test(STATE.priceUpdated)?STATE.priceUpdated:'';
   const candidates=[taipeiISO(0),taipeiISO(1),hint].filter((d,i,a)=>d&&a.indexOf(d)===i);
   for(const date of candidates){
@@ -423,10 +434,10 @@ async function refreshTwseDaily(){
       const table=(payload.tables||[]).find(t=>Array.isArray(t.fields)&&t.fields.includes('證券代號')&&t.fields.includes('收盤價'));
       if(!table||!Array.isArray(table.data)) continue;
       const pos=Object.fromEntries(table.fields.map((field,index)=>[field,index]));
-      let count=0;
+      const quotes={};
       table.data.forEach(row=>{
         const code=String(row[pos['證券代號']]||'').trim();
-        if(!/^\d{4}$/.test(code)||code.startsWith('91')||(STATE.activeStockIds&&!STATE.activeStockIds.has(code))) return;
+        if(!usableCode(code)) return;
         const item={
           date,
           o:quoteNumber(row[pos['開盤價']]),
@@ -434,19 +445,60 @@ async function refreshTwseDaily(){
           l:quoteNumber(row[pos['最低價']]),
           c:quoteNumber(row[pos['收盤價']]),
         };
-        if(Object.values(item).slice(1).every(v=>v===null)) return;
-        STATE.ohlc[code]=item; count++;
+        if(['o','h','l','c'].every(key=>item[key]===null)) return;
+        quotes[code]=item;
       });
-      if(!count) continue;
-      if(!STATE.priceUpdated||date>STATE.priceUpdated) STATE.priceUpdated=date;
-      cacheSet(LS.ohlc,JSON.stringify(STATE.ohlc));
-      cacheSet(LS.priceDate,STATE.priceUpdated);
-      updateDataMeta(); render();
-      $('lastUpd').textContent='上市行情更新於 '+date+'（TWSE 官方）';
-      return count;
+      if(Object.keys(quotes).length<800) continue;
+      return {label:'上市',date,quotes};
     }catch(e){ /* 用下一個候選交易日；全部失敗時保留 GitHub 快照。 */ }
   }
-  return 0;
+  return null;
+}
+async function dataGovSnapshot(label,url,minCount,fields){
+  const res=await fetch(url+'&_='+Date.now(),{cache:'no-store'});
+  if(!res.ok) return null;
+  const rows=await res.json();
+  if(!Array.isArray(rows)) return null;
+  const dates=new Set(),quotes={};
+  rows.forEach(row=>{
+    const date=rocISO(row['資料日期']);
+    const code=String(row['代號']||'').trim();
+    if(!date||!usableCode(code)) return;
+    dates.add(date);
+    const item={
+      date,
+      o:fields.o?quoteNumber(row[fields.o]):null,
+      h:quoteNumber(row[fields.h]),
+      l:quoteNumber(row[fields.l]),
+      c:quoteNumber(row[fields.c]),
+    };
+    if(['o','h','l','c'].every(key=>item[key]===null)) return;
+    quotes[code]=item;
+  });
+  if(dates.size!==1||Object.keys(quotes).length<minCount) return null;
+  return {label,date:[...dates][0],quotes};
+}
+async function refreshOfficialDaily(){
+  const results=await Promise.allSettled([
+    twseSnapshot(),
+    dataGovSnapshot('上櫃',TPEX_CORS,650,{o:'開盤',h:'最高',l:'最低',c:'收盤'}),
+    dataGovSnapshot('興櫃',ESB_CORS,150,{o:null,h:'日最高',l:'日最低',c:'成交'}),
+  ]);
+  const snapshots=results.filter(r=>r.status==='fulfilled'&&r.value).map(r=>r.value);
+  let applied=0;
+  snapshots.forEach(snapshot=>{
+    Object.entries(snapshot.quotes).forEach(([code,item])=>{
+      const old=STATE.ohlc[code];
+      if(!old?.date||item.date>=old.date){ STATE.ohlc[code]=item; applied++; }
+    });
+  });
+  if(!applied) return 0;
+  STATE.priceUpdated=Object.values(STATE.ohlc).reduce((latest,row)=>row?.date&&row.date>latest?row.date:latest,'');
+  cacheSet(LS.ohlc,JSON.stringify(STATE.ohlc));
+  cacheSet(LS.priceDate,STATE.priceUpdated);
+  updateDataMeta(); render();
+  $('lastUpd').textContent='行情更新：'+snapshots.map(s=>s.label+' '+s.date).join('、');
+  return applied;
 }
 function setProxy(){
   STATE.proxy='direct';
@@ -1044,9 +1096,9 @@ function init(){
       updateDataMeta();
       $('seedWarn').style.display='none';
       buildIndustryOptions(); render();
-      refreshTwseDaily();
+      refreshOfficialDaily();
     })
-    .catch(e=>{ console.error('自動資料載入失敗',e); $('lastUpd').textContent='自動資料載入失敗，改用 TWSE 行情'; refreshTwseDaily(); });
+    .catch(e=>{ console.error('自動資料載入失敗',e); $('lastUpd').textContent='自動資料載入失敗，改用交易所行情'; refreshOfficialDaily(); });
 }
 init();
 // 多道保險：字體載入完、頁面全載入、視窗縮放後，都重新校正凍結欄位置
