@@ -16,7 +16,7 @@ import requests
 
 OUT = Path(os.environ.get("DATA_FILE", "finmind_data.json"))
 TWSE = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
-TPEX_MAIN = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes"
+TPEX_MAIN = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes"
 TPEX_ESB = "https://www.tpex.org.tw/openapi/v1/tpex_esb_latest_statistics"
 HEADERS = {"User-Agent": "stockepsv1-data-updater/2.0", "Accept": "application/json"}
 MIN_TOTAL = int(os.environ.get("MIN_PRICE_TOTAL", "1000"))
@@ -135,6 +135,14 @@ def collect() -> tuple[dict[str, dict[str, Any]], dict[str, str], dict[str, str]
     return latest, markets, source_dates, source_counts
 
 
+def common_source_date(source_dates: dict[str, str]) -> str | None:
+    """Return the market date only when every required source agrees."""
+    if set(source_dates) != set(MIN_SOURCE_COUNTS):
+        return None
+    dates = set(source_dates.values())
+    return next(iter(dates)) if len(dates) == 1 else None
+
+
 def load() -> dict[str, Any]:
     try:
         with OUT.open(encoding="utf-8") as handle:
@@ -193,15 +201,17 @@ def main() -> int:
         tag for tag, minimum in MIN_SOURCE_COUNTS.items()
         if source_counts.get(tag, 0) < minimum or tag not in source_dates
     ]
-    if len(latest) < MIN_TOTAL or bad_sources:
+    market_date = common_source_date(source_dates)
+    if len(latest) < MIN_TOTAL or bad_sources or market_date is None:
         print(
             f"error: incomplete quote snapshot ({len(latest)} total; bad sources={bad_sources}); "
+            f"source dates={source_dates}; "
             "refusing to overwrite cached data",
             flush=True,
         )
         return 1
 
-    max_date = max(source_dates.values())
+    max_date = market_date
     old = load()
     listed = old.get("active_stock_ids", [])
     active = {
@@ -224,10 +234,21 @@ def main() -> int:
     }
     merged_markets.update(markets)
 
+    merged_history = merge_history(old.get("ohlc_history", {}), latest, max_date, active)
+    if (
+        old.get("ohlc") == merged_latest
+        and old.get("ohlc_history") == merged_history
+        and old.get("market") == merged_markets
+        and old.get("price_updated") == max_date
+        and old.get("price_source_dates") == source_dates
+    ):
+        print(f"done: no quote changes for {max_date}", flush=True)
+        return 0
+
     old.update({
         "schema_version": 2,
         "ohlc": merged_latest,
-        "ohlc_history": merge_history(old.get("ohlc_history", {}), latest, max_date, active),
+        "ohlc_history": merged_history,
         "market": merged_markets,
         # This is the actual market date, not the workflow execution date.
         "price_updated": max_date,

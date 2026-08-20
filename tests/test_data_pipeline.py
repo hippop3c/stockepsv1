@@ -97,6 +97,12 @@ class PriceTests(unittest.TestCase):
         self.assertEqual(update_price.trading_date("2026-08-18"), "2026-08-18")
         self.assertIsNone(update_price.trading_date("--"))
 
+    def test_all_market_sources_must_share_one_date(self):
+        complete = {"TWSE": "2026-08-19", "TPEX": "2026-08-19", "ESB": "2026-08-19"}
+        mixed = {"TWSE": "2026-08-18", "TPEX": "2026-08-19", "ESB": "2026-08-19"}
+        self.assertEqual(update_price.common_source_date(complete), "2026-08-19")
+        self.assertIsNone(update_price.common_source_date(mixed))
+
     def test_history_replaces_same_day_and_prunes(self):
         max_date = dt.date.today().isoformat()
         old_date = (dt.date.today() - dt.timedelta(days=121)).isoformat()

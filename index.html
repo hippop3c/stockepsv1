@@ -328,6 +328,13 @@ const API = 'https://api.finmindtrade.com/api/v4/data';
 
 /*===== 工具 =====*/
 const $ = id => document.getElementById(id);
+function cacheGet(key){ try{ return localStorage.getItem(key); }catch(e){ return null; } }
+function cacheSet(key,value){ try{ localStorage.setItem(key,value); return true; }catch(e){ return false; } }
+function cacheRemove(key){ try{ localStorage.removeItem(key); }catch(e){} }
+function cacheJSON(key,fallback=null){
+  const raw=cacheGet(key); if(!raw) return fallback;
+  try{ return JSON.parse(raw); }catch(e){ return fallback; }
+}
 const fmt = (v,d=2)=> (v===null||v===undefined||isNaN(v))?'–':Number(v).toFixed(d);
 const esc = v => String(v??'').replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
 const csv = v => `"${String(v??'').replace(/"/g,'""')}"`;
@@ -392,6 +399,55 @@ async function fmGet(params){
   if(j.msg && j.status && j.status!==200 && !(j.data&&j.data.length)) throw new Error(j.msg||'API error');
   return j.data||[];
 }
+
+/* 重新整理時直接向 TWSE 取得最新已收盤日；官方端點允許瀏覽器跨來源讀取。 */
+function taipeiISO(daysAgo=0){
+  const d=new Date(Date.now()+8*60*60*1000);
+  d.setUTCDate(d.getUTCDate()-daysAgo);
+  return d.toISOString().slice(0,10);
+}
+function quoteNumber(value){
+  const n=Number(String(value??'').replace(/,/g,'').trim());
+  return Number.isFinite(n)&&n>0?n:null;
+}
+async function refreshTwseDaily(){
+  const hint=/^\d{4}-\d{2}-\d{2}$/.test(STATE.priceUpdated)?STATE.priceUpdated:'';
+  const candidates=[taipeiISO(0),taipeiISO(1),hint].filter((d,i,a)=>d&&a.indexOf(d)===i);
+  for(const date of candidates){
+    try{
+      const compact=date.replace(/-/g,'');
+      const url='https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?date='+compact+'&type=ALLBUT0999&response=json&_='+Date.now();
+      const res=await fetch(url,{cache:'no-store'});
+      if(!res.ok) continue;
+      const payload=await res.json();
+      const table=(payload.tables||[]).find(t=>Array.isArray(t.fields)&&t.fields.includes('證券代號')&&t.fields.includes('收盤價'));
+      if(!table||!Array.isArray(table.data)) continue;
+      const pos=Object.fromEntries(table.fields.map((field,index)=>[field,index]));
+      let count=0;
+      table.data.forEach(row=>{
+        const code=String(row[pos['證券代號']]||'').trim();
+        if(!/^\d{4}$/.test(code)||code.startsWith('91')||(STATE.activeStockIds&&!STATE.activeStockIds.has(code))) return;
+        const item={
+          date,
+          o:quoteNumber(row[pos['開盤價']]),
+          h:quoteNumber(row[pos['最高價']]),
+          l:quoteNumber(row[pos['最低價']]),
+          c:quoteNumber(row[pos['收盤價']]),
+        };
+        if(Object.values(item).slice(1).every(v=>v===null)) return;
+        STATE.ohlc[code]=item; count++;
+      });
+      if(!count) continue;
+      if(!STATE.priceUpdated||date>STATE.priceUpdated) STATE.priceUpdated=date;
+      cacheSet(LS.ohlc,JSON.stringify(STATE.ohlc));
+      cacheSet(LS.priceDate,STATE.priceUpdated);
+      updateDataMeta(); render();
+      $('lastUpd').textContent='上市行情更新於 '+date+'（TWSE 官方）';
+      return count;
+    }catch(e){ /* 用下一個候選交易日；全部失敗時保留 GitHub 快照。 */ }
+  }
+  return 0;
+}
 function setProxy(){
   STATE.proxy='direct';
   STATE.proxyUrl='';
@@ -421,7 +477,7 @@ async function updateIndustry(){
     const map={};
     data.forEach(d=>{ if(d.stock_id && d.industry_category) map[d.stock_id]=d.industry_category; });
     STATE.industry=map;
-    localStorage.setItem(LS.ind, JSON.stringify(map));
+    cacheSet(LS.ind, JSON.stringify(map));
     setBar(100); plog('完成，取得 '+Object.keys(map).length+' 檔產業別。');
     applyIndustry(); buildIndustryOptions(); render(); stampUpd();
   }catch(e){ plog('❌ 失敗: '+e.message); alert('更新類股失敗: '+e.message); }
@@ -482,7 +538,7 @@ async function fetchFinancials(){
       fin[code]=normalizeEpsRecords(fin[code]);
     });
     STATE.financials=fin;
-    localStorage.setItem(LS.fin, JSON.stringify(fin));
+    cacheSet(LS.fin, JSON.stringify(fin));
     setBar(100); plog('✅ 完成，共 '+Object.keys(fin).length+' 檔有財報資料。');
     render(); stampUpd();
   }catch(e){ plog('❌ 失敗: '+e.message); alert('抓取財報失敗: '+e.message+'\n（可能超過 600/hr 限制，稍後再試）'); }
@@ -819,10 +875,9 @@ function setShow(s){ STATE.show=s;
 
 /*===== 儲存/載入 =====*/
 function saveData(){
-  try{ localStorage.setItem(LS.data, JSON.stringify(STATE.rows)); }
-  catch(e){ /* 全市場資料超過瀏覽器配額時仍保留記憶體資料，本頁可正常使用。 */ }
+  cacheSet(LS.data, JSON.stringify(STATE.rows));
 }
-function stampUpd(){ const t=new Date().toLocaleString('zh-TW'); localStorage.setItem(LS.upd,t); $('lastUpd').textContent='更新於 '+t; }
+function stampUpd(){ const t=new Date().toLocaleString('zh-TW'); cacheSet(LS.upd,t); $('lastUpd').textContent='更新於 '+t; }
 function updateDataMeta(){
   $('dataUpd').textContent=STATE.dataUpdated||'內建備援資料';
   $('priceUpd').textContent=STATE.priceUpdated||'尚無每日行情';
@@ -859,7 +914,7 @@ function mergeUniverse(j){
 }
 function clearCache(){
   if(!confirm('確定清除本機所有快取（財報/類股/股價/Token）並還原成初始候選池？')) return;
-  Object.values(LS).forEach(k=>localStorage.removeItem(k));
+  Object.values(LS).forEach(cacheRemove);
   location.reload();
 }
 function importJSON(ev){
@@ -869,25 +924,25 @@ function importJSON(ev){
     try{
       const j=JSON.parse(rd.result);
       let nFin=0,nInd=0,nPx=0;
-      if(j.industry){ STATE.industry=j.industry; localStorage.setItem(LS.ind,JSON.stringify(j.industry)); applyIndustry(); nInd=Object.keys(j.industry).length; }
+      if(j.industry){ STATE.industry=j.industry; cacheSet(LS.ind,JSON.stringify(j.industry)); applyIndustry(); nInd=Object.keys(j.industry).length; }
       if(j.financials){
         Object.keys(j.financials).forEach(c=>{
           j.financials[c]=normalizeEpsRecords(j.financials[c]);
         });
         STATE.financials=j.financials;
-        try{localStorage.setItem(LS.fin,JSON.stringify(j.financials));}catch(e){}
+        cacheSet(LS.fin,JSON.stringify(j.financials));
         nFin=Object.keys(j.financials).length;
       }
       mergeUniverse(j);
       if(j.price){ STATE.rows.forEach(r=>{ if(j.price[r.code]!=null){ r.price=Number(j.price[r.code]); nPx++; } }); saveData(); }
-      if(j.ohlc){ STATE.ohlc=j.ohlc; try{localStorage.setItem(LS.ohlc,JSON.stringify(j.ohlc));}catch(e){} }
-      if(j.market){ STATE.market=j.market; try{localStorage.setItem(LS.market,JSON.stringify(j.market));}catch(e){} }
+      if(j.ohlc){ STATE.ohlc=j.ohlc; cacheSet(LS.ohlc,JSON.stringify(j.ohlc)); }
+      if(j.market){ STATE.market=j.market; cacheSet(LS.market,JSON.stringify(j.market)); }
       const importedTargets=j.target_price||j.foreign_target_price||j.targetPrice;
-      if(importedTargets){ STATE.targetPrice=importedTargets; try{localStorage.setItem(LS.target,JSON.stringify(importedTargets));}catch(e){} }
+      if(importedTargets){ STATE.targetPrice=importedTargets; cacheSet(LS.target,JSON.stringify(importedTargets)); }
       STATE.dataUpdated=String(j.updated||STATE.dataUpdated||'');
       STATE.priceUpdated=String(j.price_date||j.price_updated||STATE.priceUpdated||'');
-      if(STATE.dataUpdated) localStorage.setItem(LS.dataDate,STATE.dataUpdated);
-      if(STATE.priceUpdated) localStorage.setItem(LS.priceDate,STATE.priceUpdated);
+      if(STATE.dataUpdated) cacheSet(LS.dataDate,STATE.dataUpdated);
+      if(STATE.priceUpdated) cacheSet(LS.priceDate,STATE.priceUpdated);
       updateDataMeta();
       buildIndustryOptions(); render(); stampUpd();
       $('seedWarn').style.display='none';
@@ -921,31 +976,31 @@ function exportCSV(){
 /*===== 啟動 =====*/
 function init(){
   // Token 不持久化，並清除舊版可能留下的值。
-  localStorage.removeItem(LS.token);
+  cacheRemove(LS.token);
   $('token').value = DEFAULT_TOKEN;
   // 安全起見只直接連 FinMind，舊版儲存的第三方 proxy 設定不再採用。
   STATE.proxy='direct'; $('proxy').value='direct';
   STATE.proxyUrl='';
   // 主資料
-  const saved=localStorage.getItem(LS.data);
-  STATE.rows = saved? JSON.parse(saved) : JSON.parse(JSON.stringify(SEED));
+  const saved=cacheJSON(LS.data);
+  STATE.rows = Array.isArray(saved) ? saved : JSON.parse(JSON.stringify(SEED));
   // 類股
-  const ind=localStorage.getItem(LS.ind); if(ind){ STATE.industry=JSON.parse(ind); applyIndustry(); }
+  const ind=cacheJSON(LS.ind); if(ind){ STATE.industry=ind; applyIndustry(); }
   // 財報
-  const fin=localStorage.getItem(LS.fin); if(fin){
+  const fin=cacheJSON(LS.fin); if(fin){
     try{
-      STATE.financials=JSON.parse(fin);
+      STATE.financials=fin;
       Object.keys(STATE.financials).forEach(c=>{ STATE.financials[c]=normalizeEpsRecords(STATE.financials[c]); });
     }catch(e){ STATE.financials={}; }
   }
   // ohlc 快取：開機先用上次存的收開高低，避免等 json 期間整欄空白
-  const oh=localStorage.getItem(LS.ohlc); if(oh){ try{ STATE.ohlc=JSON.parse(oh); }catch(e){} }
-  const mk=localStorage.getItem(LS.market); if(mk){ try{ STATE.market=JSON.parse(mk); }catch(e){} }
-  const tp=localStorage.getItem(LS.target); if(tp){ try{ STATE.targetPrice=JSON.parse(tp); }catch(e){} }
-  STATE.dataUpdated=localStorage.getItem(LS.dataDate)||'';
-  STATE.priceUpdated=localStorage.getItem(LS.priceDate)||'';
+  const oh=cacheJSON(LS.ohlc); if(oh) STATE.ohlc=oh;
+  const mk=cacheJSON(LS.market); if(mk) STATE.market=mk;
+  const tp=cacheJSON(LS.target); if(tp) STATE.targetPrice=tp;
+  STATE.dataUpdated=cacheGet(LS.dataDate)||'';
+  STATE.priceUpdated=cacheGet(LS.priceDate)||'';
   // 更新時間
-  const up=localStorage.getItem(LS.upd); if(up) $('lastUpd').textContent='更新於 '+up;
+  const up=cacheGet(LS.upd); if(up) $('lastUpd').textContent='更新於 '+up;
   if(Object.keys(STATE.financials).length) $('seedWarn').style.display='none';
 
   $('years').addEventListener('input',()=>{ $('qcount').textContent=(parseInt($('years').value)||3)*4; });
@@ -954,37 +1009,44 @@ function init(){
   render();
 
   // === GitHub Pages：自動載入同源 finmind_data.json（由 GitHub Actions 定時產生）===
-  fetch('./finmind_data.json', {cache:'no-store'})
-    .then(r => r.ok ? r.json() : null)
+  fetch('./finmind_data.json?v='+Date.now(), {cache:'no-store'})
+    .then(r => { if(!r.ok) throw new Error('HTTP '+r.status); return r.json(); })
     .then(j => {
-      if(!j) return;
-      if(j.industry){ STATE.industry=j.industry; localStorage.setItem(LS.ind,JSON.stringify(j.industry)); applyIndustry(); }
+      if(!j || typeof j!=='object') throw new Error('資料格式錯誤');
+      // 遠端快照永遠先寫入記憶體；瀏覽器快取滿載也不能阻止畫面更新。
+      if(j.industry){ STATE.industry=j.industry; applyIndustry(); }
       if(j.name){ STATE.names=j.name; }
-      if(j.ohlc){ STATE.ohlc=j.ohlc; try{ localStorage.setItem(LS.ohlc, JSON.stringify(j.ohlc)); }catch(e){} }
-      if(j.market){ STATE.market=j.market; try{ localStorage.setItem(LS.market, JSON.stringify(j.market)); }catch(e){} }
+      if(j.ohlc){ STATE.ohlc=j.ohlc; }
+      if(j.market){ STATE.market=j.market; }
       const targets=j.target_price||j.foreign_target_price||j.targetPrice;
-      if(targets){ STATE.targetPrice=targets; try{localStorage.setItem(LS.target,JSON.stringify(targets));}catch(e){} }
+      if(targets){ STATE.targetPrice=targets; }
       STATE.dataUpdated=String(j.updated||'');
       STATE.priceUpdated=String(j.price_date||j.price_updated||'');
-      if(STATE.dataUpdated) localStorage.setItem(LS.dataDate,STATE.dataUpdated);
-      if(STATE.priceUpdated) localStorage.setItem(LS.priceDate,STATE.priceUpdated);
       if(j.financials){
         Object.keys(j.financials).forEach(c=>{
           j.financials[c]=normalizeEpsRecords(j.financials[c]);
         });
-        try{ STATE.financials=j.financials; localStorage.setItem(LS.fin,JSON.stringify(j.financials)); }
-        catch(e){ STATE.financials=j.financials; /* 全市場資料較大，localStorage 存不下就只放記憶體，下次自動載入會重抓 */ }
+        STATE.financials=j.financials;
       }
       // 以全市場財報為主體，把不在候選池的股票也加進來並同步名稱/類股。
       mergeUniverse(j);
       if(j.price){ STATE.rows.forEach(r=>{ if(j.price[r.code]!=null) r.price=Number(j.price[r.code]); }); }
+      // 財報快照超過常見 localStorage 配額；清除舊快取，僅保存較小的備援資料。
+      cacheRemove(LS.fin);
+      if(j.industry) cacheSet(LS.ind,JSON.stringify(j.industry));
+      if(j.ohlc) cacheSet(LS.ohlc,JSON.stringify(j.ohlc));
+      if(j.market) cacheSet(LS.market,JSON.stringify(j.market));
+      if(targets) cacheSet(LS.target,JSON.stringify(targets));
+      if(STATE.dataUpdated) cacheSet(LS.dataDate,STATE.dataUpdated);
+      if(STATE.priceUpdated) cacheSet(LS.priceDate,STATE.priceUpdated);
       saveData();
       if(j.updated){ $('lastUpd').textContent='資料更新於 '+j.updated+'（GitHub 自動）'; }
       updateDataMeta();
       $('seedWarn').style.display='none';
       buildIndustryOptions(); render();
+      refreshTwseDaily();
     })
-    .catch(()=>{ /* 沒有該檔就維持內建候選池 */ });
+    .catch(e=>{ console.error('自動資料載入失敗',e); $('lastUpd').textContent='自動資料載入失敗，改用 TWSE 行情'; refreshTwseDaily(); });
 }
 init();
 // 多道保險：字體載入完、頁面全載入、視窗縮放後，都重新校正凍結欄位置

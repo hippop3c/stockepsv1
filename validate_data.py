@@ -121,8 +121,8 @@ def main() -> int:
     if not isinstance(source_dates, dict) or set(source_dates) != {"TWSE", "TPEX", "ESB"}:
         fail("price_source_dates must contain TWSE, TPEX, and ESB")
     for source, value in source_dates.items():
-        if iso_date(value, f"price_source_dates.{source}") > price_updated:
-            fail(f"price_source_dates.{source} is later than price_updated")
+        if iso_date(value, f"price_source_dates.{source}") != price_updated:
+            fail(f"price_source_dates.{source} does not match price_updated")
 
     history = data.get("ohlc_history", {})
     if not isinstance(history, dict) or any(code not in active_set for code in history):
